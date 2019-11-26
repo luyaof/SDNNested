@@ -394,3 +394,127 @@ function New-SDNS2DCluster {
         Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\spaceport\Parameters -Name HwTimeout -Value 0x00007530
     } | Out-Null
 }
+
+
+function New-SdnDC()
+{
+    Param(
+        [String] $VMName,
+        [String] $DomainFQDN,
+        #Local Admin Credential will also be used as SafeModeAdministratorPassword
+        [securestring] $LocalAdminPassword
+    )
+    
+    $paramsDeployForest = @{
+        DomainName                    = $DomainFQDN
+        DomainMode                    = 'WinThreshold'
+        DomainNetBiosName             = ($ConfigData.DomainFQDN).split(".")[0]
+        SafeModeAdministratorPassword = $LocalAdminPassword 
+    }
+
+    $LocalAdminCredential = New-Object System.Management.Automation.PSCredential(".\administrator", $LocalAdminPassword)
+
+    Invoke-Command -VMName $VMName -Credential $LocalAdminCredential -ScriptBlock {
+        Write-host -ForegroundColor Green "Installing AD-Domain-Services on vm $env:COMPUTERNAME"
+        Install-WindowsFeature -name AD-Domain-Services -IncludeManagementTools | Out-Null
+        
+        $params = @{
+            DomainName                    = $args.DomainName
+            DomainMode                    = $args.DomainMode
+            SafeModeAdministratorPassword = $args.SafeModeAdministratorPassword
+        }
+        Write-host -ForegroundColor Green "Installing ADDSForest on vm $env:COMPUTERNAME"
+        Install-ADDSForest @params -InstallDns -Confirm -Force | Out-Null
+        #
+    } -ArgumentList $paramsDeployForest
+
+    #Write-host -ForegroundColor Green "Restarting vm $($dc.computername)"
+    #Restart-VM $dc.ComputerName -Force
+
+    Write-host "Wait till ADDS is totally up and running"
+
+    while ((Invoke-Command -VMName $dc.ComputerName -Credential $DomainJoinCredential { $env:COMPUTERNAME } `
+                -ea SilentlyContinue) -ne $dc.ComputerName) { Start-Sleep -Seconds 1 }
+}
+function New-SdnHost
+{
+    Param(
+        [String] $VMName,
+        [Int] $S2DDiskSize = 0,
+        [Int] $S2DDiskNumber,
+        [pscredential] $DomainJoinCredential
+    )
+  
+    #required for nested virtualization 
+    Get-VM -Name $VMName | Set-VMProcessor -ExposeVirtualizationExtensions $true | out-null
+    #Required to allow multiple MAC per vNIC
+    Get-VM -Name $VMName | Get-VMNetworkAdapter | Set-VMNetworkAdapter -MacAddressSpoofing On
+
+    #Create S2D Disk optional 
+    if($S2DDiskSize -ne 0)
+    {
+        Write-Host -ForegroundColor Green "Step 2 - Adding  VM DataDisk for S2D on $VMName" 
+        Add-VMDataDisk $VMName $S2DDiskSize $S2DDiskNumber
+    }
+    
+    Write-Host -ForegroundColor Green  "Step 3 - Starting VM $VMName"
+    Start-VM $VMName
+ 
+    Write-Host -ForegroundColor yellow "Waiting till the $VMName is not domain joined to $($configdata.DomainFQDN)"
+    Start-Sleep 120
+    while ( $( Invoke-Command -VMName $VMName -Credential $DomainJoinCredential { 
+                (Get-WmiObject -Class Win32_ComputerSystem).PartOfDomain }) -ne $true ) {
+        Start-Sleep 1
+    }
+
+    Write-Host -ForegroundColor Green  "Step 4 - Adding required features on VM $($node.ComputerName)"
+    Invoke-Command -VMName $VMName -Credential $DomainJoinCredential {
+        $FeatureList = "Hyper-V", "Failover-Clustering", "Data-Center-Bridging", "RSAT-Clustering-PowerShell", "Hyper-V-PowerShell", "FS-FileServer"
+        Add-WindowsFeature $FeatureList 
+        Restart-Computer -Force
+    }
+
+    Write-host "Wait till the VM $VMName is not WinRM reachable"
+    Start-Sleep 120
+    while ((Invoke-Command -VMName $VMName -Credential $DomainJoinCredential { $env:COMPUTERNAME } `
+                -ea SilentlyContinue) -ne $VMName) { Start-Sleep -Seconds 1 }  
+
+    Invoke-Command -VMName $VMName -Credential $DomainJoinCredential {
+        Write-Host -ForegroundColor Green "Step 5 - Adding SDN VMSwitch on $($env:COMPUTERNAME)"
+        New-VMSwitch -NetAdapterName $(Get-Netadapter).Name -SwitchName SDNSwitch -AllowManagementOS $true | Out-Null
+        Get-VMNetworkAdapter -ManagementOS -Name SDNSwitch | Rename-VMNetworkAdapter -NewName MGMT
+        Get-VMNetworkAdapter -ManagementOS -Name MGMT | Set-VMNetworkAdapterVlan -Access -VlanId $args[0]
+        #Cred SSDP for remote administration
+        Write-Host -ForegroundColor Green "Step 6 - Allowing CredSSP to managed HYPV host $($env:COMPUTERNAME) from Azure VM"
+        Enable-WSManCredSSP -Role Server -Force
+        Set-VMHost  -EnableEnhancedSessionMode $true
+    } -ArgumentList $Node.NICs[0].VLANID
+    Get-VMNetworkAdapter -VMName $VMName | Set-VMNetworkAdapterVlan -Trunk -AllowedVlanIdList 7-1001 -NativeVlanId 0
+    #Adding credential to the cache
+    Invoke-Expression -Command "cmdkey /add:$VMName.$($configdata.DomainFQDN) /user:$($configdata.DomainJoinUsername) /pass:$DomainJoinPassword"
+}
+
+function New-SdnToR()
+{
+    Param(
+        [String] $VMName,
+        [String] $RouterIPAddress,
+        [String] $LocalASN,
+        [Object] $BgpPeers,
+        [pscredential] $DomainJoinCredential
+    )
+
+    Invoke-Command -VMName $VMName -Credential $DomainJoinCredential { 
+        Write-host -ForegroundColor Green "Installing RemoteAccess on vm $env:COMPUTERNAME to act as TOR Router"   
+        Add-WindowsFeature RemoteAccess -IncludeAllSubFeature -IncludeManagementTools
+        Install-RemoteAccess -VpnType RoutingOnly
+        Write-host -ForegroundColor Yellow "Configuring BGP router and peers"   
+        Add-BgpRouter -BgpIdentifier $RouterIPAddress -LocalASN $LocalASN
+        foreach ( $BgpPeer in $BgpPeers) {
+            Write-host -ForegroundColor Yellow "Configuring BGP Peer $($BgpPeer.Name), Peer IP: $($BgpPeer.PeerIPAddress), PeerAsn $($BgpPeer.PeerAsn)"  
+            Add-BgpPeer -Name $BgpPeer.Name -LocalIPAddress $RouterIPAddress -PeerIPAddress $BgpPeer.PeerIPAddress `
+                -PeerASN $BgpPeer.PeerASN -OperationMode Mixed -PeeringMode Automatic 
+        }
+    
+    }
+}

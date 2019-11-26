@@ -3,6 +3,7 @@
 
     VHDPath              = "F:\VMs\Template"
     VHDFile              = "Win2019-Core.vhdx"
+    VHDFileGUI           = "Win2019-GUI.vhdx"
 
     VMLocation           = "F:\VMs"
     DomainFQDN           = "SDN.LAB"
@@ -56,12 +57,16 @@
     @(
         @{
             ComputerName = 'SDN-HOST01'; 
+            VMMemory     = 24GB
+            VMProcessorCount = 4 
             NICs         = @( 
                 @{ Name = "Ethernet"; IPAddress = '10.184.108.2/24'; Gateway = '10.184.108.1'; DNS = @("10.184.108.1") ; VLANID = 7 };
             )   
         },   
         @{
             ComputerName = 'SDN-HOST02'; 
+            VMMemory     = 24GB
+            VMProcessorCount = 4 
             NICs         = @( 
                 @{ Name = "Ethernet"; IPAddress = '10.184.108.3/24'; Gateway = '10.184.108.1'; DNS = @("10.184.108.1") ; VLANID = 7 };
             )   

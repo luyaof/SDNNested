@@ -90,6 +90,28 @@ $LocalAdminCredential = New-Object System.Management.Automation.PSCredential(".\
 if ( $null -eq $ConfigData.VMProcessorCount) { $ConfigData.VMProcessorCount = 2 }
 if ( $null -eq $ConfigData.VMMemory) { $ConfigData.VMMemory = 4GB }
 
+$paramsVM = @{
+    'VMLocation'          = $ConfigData.VMLocation;
+    'VMName'              = '';
+    'VHDSrcPath'          = $ConfigData.VHDPath;
+    'VHDName'             = '';
+    'VMMemory'            = $ConfigData.VMMemory;
+    'VMProcessorCount'    = $ConfigData.VMProcessorCount;
+    'SwitchName'          = $ConfigData.SwitchName;
+    'NICs'                = @();
+    'CredentialDomain'    = $DomainJoinUserNameDomain;
+    'CredentialUserName'  = $DomainJoinUserNameName;
+    'CredentialPassword'  = $DomainJoinPassword;
+    'JoinDomain'          = $ConfigData.DomainFQDN;
+    'LocalAdminPassword'  = $LocalAdminPassword;
+    'DomainAdminDomain'   = $LocalAdminDomainUserDomain;
+    'DomainAdminUserName' = $LocalAdminDomainUserName;
+    'IpGwAddr'            = $ConfigData.ManagementGateway;
+    'DnsIpAddr'           = $ConfigDanoteta.ManagementDNS;
+    'DomainFQDN'          = $ConfigData.DomainFQDN;
+    'ProductKey'          = $ConfigData.ProductKey;
+}
+
 $paramsAD = @{
     'VMLocation'          = $ConfigData.VMLocation;
     'VMName'              = '';
@@ -235,48 +257,22 @@ Write-Host "####"
 Write-Host "--- Start Domain controller deployment "
 #Creating DC
 foreach ( $dc in $configdata.DCs) {
-    $paramsAD.VMName = $dc.ComputerName
-    $paramsAD.Nics = $dc.NICs
-    $paramsAD.VHDName = "Win2019-GUI.vhdx"
+    $paramsVM.VMName = $dc.ComputerName
+    $paramsVM.Nics = $dc.NICs
+    $paramsVM.VHDName = $configdata.VHDFileGUI
 
     Write-Host -ForegroundColor Green "Step 1 - Creating DC VM $($dc.ComputerName)" 
-    New-SdnVM @paramsAD 
+    New-SdnVM @paramsVM 
 
     Start-VM $dc.ComputerName
     Write-host "Wait till the VM $($dc.ComputerName) is not WinRM reachable"
     while ((Invoke-Command -VMName $dc.ComputerName -Credential $LocalAdminCredential { $env:COMPUTERNAME } `
                 -ea SilentlyContinue) -ne $dc.ComputerName) { Start-Sleep -Seconds 1 }
 
-    $paramsDeployForest = @{
 
-        DomainName                    = $ConfigData.DomainFQDN
-        DomainMode                    = 'WinThreshold'
-        DomainNetBiosName             = ($ConfigData.DomainFQDN).split(".")[0]
-        SafeModeAdministratorPassword = $password
-
-    }
-
-    Invoke-Command -VMName $dc.ComputerName -Credential $LocalAdminCredential -ScriptBlock {
-        Write-host -ForegroundColor Green "Installing AD-Domain-Services on vm $env:COMPUTERNAME"
-        Install-WindowsFeature -name AD-Domain-Services -IncludeManagementTools | Out-Null
-        
-        $params = @{
-            DomainName                    = $args.DomainName
-            DomainMode                    = $args.DomainMode
-            SafeModeAdministratorPassword = $args.SafeModeAdministratorPassword
-        }
-        Write-host -ForegroundColor Green "Installing ADDSForest on vm $env:COMPUTERNAME"
-        Install-ADDSForest @params -InstallDns -Confirm -Force | Out-Null
-        #
-    } -ArgumentList $paramsDeployForest
-
-    #Write-host -ForegroundColor Green "Restarting vm $($dc.computername)"
-    #Restart-VM $dc.ComputerName -Force
-
-    Write-host "Wait till ADDS is totally up and running"
-
-    while ((Invoke-Command -VMName $dc.ComputerName -Credential $DomainJoinCredential { $env:COMPUTERNAME } `
-                -ea SilentlyContinue) -ne $dc.ComputerName) { Start-Sleep -Seconds 1 }
+    # Install DC and Create AD Forest 
+    New-SdnDC -VMName $dc.ComputerName -DomainFQDN $ConfigData.DomainFQDN -LocalAdminPassword $password
+    
 
 
     Invoke-Command -VMName $dc.ComputerName -Credential $DomainJoinCredential { 
@@ -321,57 +317,15 @@ Write-Host "####"
 Write-Host "--- Start Hypv hosts deployment "
 #Creating HYPV Hosts
 foreach ( $node in $configdata.HyperVHosts) {
-    $paramsHOST.VMName = $node.ComputerName
-    $paramsHOST.Nics = $node.NICs
-    $paramsHOST.VMMemory = 24GB
-    $paramsHOST.VMProcessorCount = 4
+    $paramsVM.VMName = $node.ComputerName
+    $paramsVM.Nics = $node.NICs
+    $paramsVM.VMMemory = $node.VMMemory
+    $paramsVM.VMProcessorCount = $node.VMProcessorCount
 
     Write-Host -ForegroundColor Green "Step 1 - Creating Host VM $($node.ComputerName)" 
-    New-SdnVM @paramsHOST
+    New-SdnVM @paramsVM
 
-    #required for nested virtualization 
-    Get-VM -Name $node.ComputerName | Set-VMProcessor -ExposeVirtualizationExtensions $true | out-null
-    #Required to allow multiple MAC per vNIC
-    Get-VM -Name $node.ComputerName | Get-VMNetworkAdapter | Set-VMNetworkAdapter -MacAddressSpoofing On
-
-    Write-Host -ForegroundColor Green "Step 2 - Adding  VM DataDisk for S2D on $($node.ComputerName)" 
-    Add-VMDataDisk $node.ComputerName $ConfigData.S2DDiskSize $ConfigData.S2DDiskNumber
- 
-    Write-Host -ForegroundColor Green  "Step 3 - Starting VM $($node.ComputerName)"
-    Start-VM $node.ComputerName 
- 
-    Write-Host -ForegroundColor yellow "Waiting till the $($node.computername) is not domain joindd to $($configdata.DomainFQDN)"
-    Start-Sleep 120
-    while ( $( Invoke-Command -VMName $node.ComputerName -Credential $DomainJoinCredential { 
-                (Get-WmiObject -Class Win32_ComputerSystem).PartOfDomain }) -ne $true ) {
-        Start-Sleep 1
-    }
-
-    Write-Host -ForegroundColor Green  "Step 4 - Adding required features on VM $($node.ComputerName)"
-    Invoke-Command -VMName $node.ComputerName -Credential $DomainJoinCredential {
-        $FeatureList = "Hyper-V", "Failover-Clustering", "Data-Center-Bridging", "RSAT-Clustering-PowerShell", "Hyper-V-PowerShell", "FS-FileServer"
-        Add-WindowsFeature $FeatureList 
-        Restart-Computer -Force
-    }
-
-    Write-host "Wait till the VM $($node.ComputerName) is not WinRM reachable"
-    Start-Sleep 120
-    while ((Invoke-Command -VMName $node.ComputerName -Credential $DomainJoinCredential { $env:COMPUTERNAME } `
-                -ea SilentlyContinue) -ne $node.ComputerName) { Start-Sleep -Seconds 1 }  
-
-    Invoke-Command -VMName $node.ComputerName -Credential $DomainJoinCredential {
-        Write-Host -ForegroundColor Green "Step 5 - Adding SDN VMSwitch on $($env:COMPUTERNAME)"
-        New-VMSwitch -NetAdapterName $(Get-Netadapter).Name -SwitchName SDNSwitch -AllowManagementOS $true | Out-Null
-        Get-VMNetworkAdapter -ManagementOS -Name SDNSwitch | Rename-VMNetworkAdapter -NewName MGMT
-        Get-VMNetworkAdapter -ManagementOS -Name MGMT | Set-VMNetworkAdapterVlan -Access -VlanId $args[0]
-        #Cred SSDP for remote administration
-        Write-Host -ForegroundColor Green "Step 6 - Allowing CredSSP to managed HYPV host $($env:COMPUTERNAME) from Azure VM"
-        Enable-WSManCredSSP -Role Server -Force
-        Set-VMHost  -EnableEnhancedSessionMode $true
-    } -ArgumentList $Node.NICs[0].VLANID
-    Get-VMNetworkAdapter -VMName $node.ComputerName | Set-VMNetworkAdapterVlan -Trunk -AllowedVlanIdList 7-1001 -NativeVlanId 0
-    #Adding credential to the cache
-    Invoke-Expression -Command "cmdkey /add:$($node.ComputerName).$($configdata.DomainFQDN) /user:$($configdata.DomainJoinUsername) /pass:$DomainJoinPassword"
+    New-SdnHost -VMName $node.ComputerName -S2DDiskSize $ConfigData.S2DDiskSize -S2DDiskNumber $ConfigData.S2DDiskNumber
 }
 
 $password = $DomainJoinPassword | ConvertTo-SecureString -asPlainText -Force
@@ -431,8 +385,10 @@ Write-Host "####"
 Write-Host "--- Start outside SDN stack Tenant GW deployment "
 #Creating Gw Hosts
 foreach ( $GW in $configdata.TenantInfraGWs) {
-    $paramsGW.VMName = $GW.ComputerName
-    $paramsGW.Nics = $GW.NICs
+    $paramsVM.VMName = $GW.ComputerName
+    $paramsVM.Nics = $GW.NICs
+    $paramsVM.VMMemory = $ConfigData.VMMemory
+    $paramsVM.VMProcessorCount = $ConfigData.VMProcessorCount
 
     Write-Host -ForegroundColor Green "Step 1 - Creating GW VM $($GW.ComputerName)" 
     New-SdnVM @paramsGW 
