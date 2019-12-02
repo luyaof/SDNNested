@@ -55,7 +55,7 @@ $ScriptVersion = "2.0"
 
 #Validating passed in config files
 if ($psCmdlet.ParameterSetName -eq "ConfigurationFile") {
-    Write-Host "Using configuration file passed in by parameter."    
+    Write-Host "Using configuration file $ConfigurationDataFile passed in by parameter."    
     $configdata = [hashtable] (iex (gc $ConfigurationDataFile | out-string))
 }
 elseif ($psCmdlet.ParameterSetName -eq "ConfigurationData") {
@@ -69,6 +69,8 @@ if ($Configdata.ScriptVersion -ne $scriptversion) {
     return
 }
 
+Write-Host -ForegroundColor Green "Config Data:"
+$configdata
 #Get credentials for provisionning
 $DomainJoinCredential = GetCred $ConfigData.DomainJoinSecurePassword $DomainJoinCredential `
     "Enter credentials for joining VMs to the AD domain." $configdata.DomainJoinUserName
@@ -94,53 +96,9 @@ $paramsVM = @{
     'VMLocation'          = $ConfigData.VMLocation;
     'VMName'              = '';
     'VHDSrcPath'          = $ConfigData.VHDPath;
-    'VHDName'             = '';
-    'VMMemory'            = $ConfigData.VMMemory;
-    'VMProcessorCount'    = $ConfigData.VMProcessorCount;
-    'SwitchName'          = $ConfigData.SwitchName;
-    'NICs'                = @();
-    'CredentialDomain'    = $DomainJoinUserNameDomain;
-    'CredentialUserName'  = $DomainJoinUserNameName;
-    'CredentialPassword'  = $DomainJoinPassword;
-    'JoinDomain'          = $ConfigData.DomainFQDN;
-    'LocalAdminPassword'  = $LocalAdminPassword;
-    'DomainAdminDomain'   = $LocalAdminDomainUserDomain;
-    'DomainAdminUserName' = $LocalAdminDomainUserName;
-    'IpGwAddr'            = $ConfigData.ManagementGateway;
-    'DnsIpAddr'           = $ConfigDanoteta.ManagementDNS;
-    'DomainFQDN'          = $ConfigData.DomainFQDN;
-    'ProductKey'          = $ConfigData.ProductKey;
-}
-
-$paramsAD = @{
-    'VMLocation'          = $ConfigData.VMLocation;
-    'VMName'              = '';
-    'VHDSrcPath'          = $ConfigData.VHDPath;
-    'VHDName'             = '';
-    'VMMemory'            = $ConfigData.VMMemory;
-    'VMProcessorCount'    = $ConfigData.VMProcessorCount;
-    'SwitchName'          = $ConfigData.SwitchName;
-    'NICs'                = @();
-    'CredentialDomain'    = $DomainJoinUserNameDomain;
-    'CredentialUserName'  = $DomainJoinUserNameName;
-    'CredentialPassword'  = $DomainJoinPassword;
-    'JoinDomain'          = $ConfigData.DomainFQDN;
-    'LocalAdminPassword'  = $LocalAdminPassword;
-    'DomainAdminDomain'   = $LocalAdminDomainUserDomain;
-    'DomainAdminUserName' = $LocalAdminDomainUserName;
-    'IpGwAddr'            = $ConfigData.ManagementGateway;
-    'DnsIpAddr'           = $ConfigDanoteta.ManagementDNS;
-    'DomainFQDN'          = $ConfigData.DomainFQDN;
-    'ProductKey'          = $ConfigData.ProductKey;
-}
-
-$paramsHOST = @{
-    'VMLocation'          = $ConfigData.VMLocation;
-    'VMName'              = '';
-    'VHDSrcPath'          = $ConfigData.VHDPath;
     'VHDName'             = $ConfigData.VHDFile;
-    'VMMemory'            = '';
-    'VMProcessorCount'    = '';
+    'VMMemory'            = $ConfigData.VMMemory;
+    'VMProcessorCount'    = $ConfigData.VMProcessorCount;
     'SwitchName'          = $ConfigData.SwitchName;
     'NICs'                = @();
     'CredentialDomain'    = $DomainJoinUserNameDomain;
@@ -154,6 +112,7 @@ $paramsHOST = @{
     'DnsIpAddr'           = $ConfigDanoteta.ManagementDNS;
     'DomainFQDN'          = $ConfigData.DomainFQDN;
     'ProductKey'          = $ConfigData.ProductKey;
+    'KeyboardLayout'      = $configdata.KeyboardLayout
 }
 
 $paramsGW = @{
@@ -199,13 +158,14 @@ if ( $null -eq $vmswitch ) {
     $vmswitch = New-VMSwitch -Name $configdata.SwitchName -SwitchType Internal
 }    
 
-if ( $vmswitch.name | Where-Object { $_ -eq $paramsHOST.SwitchName } ) { 
-    Write-Host -ForegroundColor Green "VMSwitch $($params.SwitchName) found"
+if ( $vmswitch.name | Where-Object { $_ -eq $configData.SwitchName } ) { 
+    Write-Host -ForegroundColor Green "VMSwitch $($configData.SwitchName) found"
 }
 else {
     throw "No virtual switch $($params.SwitchName) found on this host.  Please create the virtual switch before adding this host."    
 }
 #Checking if DCs are defined
+<#
 if ( $null -eq $configdata.DCs ) {
     throw "No Domain Controller configuration defined."    
 }
@@ -214,6 +174,7 @@ if ( $null -eq $configdata.DCs ) {
 if ( $null -eq $configdata.HyperVHosts ) {
     throw "No Hyper-V Host configuration defined."    
 }
+
 
 
 #Checking connectivity to the SDN-HOST*
@@ -244,7 +205,7 @@ if ( ($null -eq $MgmtNetIpAddr) -or ($MgmtNetIpAddr -ne $AzureVmSDNIp)) {
     $MgmtNetAdapter | Set-DnsClientServerAddress -ServerAddresses $configdata.ManagementDNS | Out-Null
 }
 
-#
+
 
 Write-Host -ForegroundColor Green "Adding Ip Route to reach SDN VIP pool $($configdata.PublicVIPNet)"
 New-NetRoute -AddressFamily "IPv4" -DestinationPrefix $configdata.PublicVIPNet -NextHop $configdata.ManagementGateway -InterfaceIndex $MgmtNetAdapter.InterfaceIndex
@@ -311,6 +272,23 @@ foreach ( $dc in $configdata.DCs) {
 
 Start-Sleep 60
 
+#>
+
+Write-Host "############"
+Write-Host "########"
+Write-Host "####"
+Write-Host "--- Start ToR deployment"
+
+foreach ( $torRouter in $configdata.TORrouter) {
+    $paramsVM.VMName = $torRouter.ComputerName
+    $paramsVM.Nics = $torRouter.NICs
+    $paramsVM.VMMemory = $torRouter.VMMemory
+    $paramsVM.VMProcessorCount = $torRouter.VMProcessorCount
+    # No need to join ToR to domain
+    $paramsVM.JoinDomain = $null
+    New-SdnToR -VMName $paramsVM.VMName -RouterIPAddress $configdata.TORrouter.bgprouter.RouterIPAddress -BgpPeers $configdata.TORrouter.BgpPeers -LocalASN $configdata.TORrouter.BgpRouter.RouterAsn -VMParams $paramsVM -LocalAdminCredential $LocalAdminCredential
+}
+
 Write-Host "############"
 Write-Host "########"
 Write-Host "####"
@@ -321,16 +299,20 @@ foreach ( $node in $configdata.HyperVHosts) {
     $paramsVM.Nics = $node.NICs
     $paramsVM.VMMemory = $node.VMMemory
     $paramsVM.VMProcessorCount = $node.VMProcessorCount
-
+    $paramsVM.JoinDomain = $configdata.DomainFQDN
     Write-Host -ForegroundColor Green "Step 1 - Creating Host VM $($node.ComputerName)" 
     New-SdnVM @paramsVM
 
-    New-SdnHost -VMName $node.ComputerName -S2DDiskSize $ConfigData.S2DDiskSize -S2DDiskNumber $ConfigData.S2DDiskNumber
+    $VlanInfo = @{
+        'AllowedVlanIdList' = $node.AllowedVlanIdList
+        'NativeVlanId' = $node.NativeVlanId
+        'ManagementVlan' = $node.Nics[0].VLANID
+    }
+
+    Write-Host -ForegroundColor Green "Step 2 - Configuring VM $($node.ComputerName) used as SDN Host" 
+    New-SdnHost -VMName $node.ComputerName -S2DDiskSize $ConfigData.S2DDiskSize -S2DDiskNumber $ConfigData.S2DDiskNumber -VlanInfo $VlanInfo -DomainJoinCredential $DomainJoinCredential
 }
-
-$password = $DomainJoinPassword | ConvertTo-SecureString -asPlainText -Force
-$DomainJoinCredential = New-Object System.Management.Automation.PSCredential($ConfigData.DomainJoinUserName, $password)
-
+<#
 Start-Sleep 60
 
 Write-Host -ForegroundColor Green "Step 6 - Creating new S2D Failover cluster for Hyperconverged SDN"
@@ -372,7 +354,7 @@ Invoke-Command -VMName $configdata.HyperVHosts[0].ComputerName  -Credential $Dom
     New-Item -Path WSMan:\localhost\Listener -Address * -Transport HTTPS -CertificateThumbPrint $Mythumbprint -force
 
     get-vm | restart-Vm -force 
-#>
+
     Add-MpPreference -ExclusionExtension "vhd"
     Add-MpPreference -ExclusionExtension "vhdx"
 } -ArgumentList $env:COMPUTERNAME, $LocalAzureVMCred
@@ -491,6 +473,7 @@ Get-VMNetworkAdapter -VMName * | Set-VMNetworkAdapter -PortMirroring Source
 Get-VMNetworkAdapter -ManagementOS -name Mirror | Set-VMNetworkAdapter -PortMirroring Destination
 Get-VMNetworkAdapter -ManagementOS -name Mirror | Set-VMNetworkAdapterVlan -Trunk -AllowedVlanIdList 7-1001 -NativeVlanId 0
 
+#>
 $HypvHost = $configdata.HyperVHosts[0].ComputerName
 Write-Host -ForegroundColor Green `
     "SDN Nested Infrastrucre is ready. You can deploy SDN using SDNExpress.ps1 script. Execute it locally from $HypvHost"

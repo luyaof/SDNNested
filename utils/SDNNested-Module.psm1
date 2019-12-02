@@ -150,6 +150,12 @@ function Add-UnattendFileToVHD {
         $DomainAccount = $null
     }
 
+    if([String]::IsNullOrEmpty($DomainJoin))
+    {
+        $UnattendedJoin = $null
+        $DomainAccountn = $null
+    }
+
     $UnattendFile = @"
 <?xml version="1.0" encoding="utf-8"?>
     <unattend xmlns="urn:schemas-microsoft-com:unattend">
@@ -239,11 +245,36 @@ function New-SdnVM() {
         [String] $ProductKey = "",
         [String] $Locale = [System.Globalization.CultureInfo]::CurrentCulture.Name,
         [String] $TimeZone = [TimeZoneInfo]::Local.Id,
-        [String] $DomainFQDN
-    )
+        [String] $DomainFQDN,
+        [String] $KeyboardLayout
+     )
     
     $CurrentVMLocationPath = "$VMLocation\$VMName"
     $VHDTemplateFile = "$VHDSrcPath\$VHDName"
+
+    Write-Host -ForegroundColor Green "New-SDNVM"
+    Write-Host -ForegroundColor Green "  -VMLocation: $VMLocation"
+    Write-Host -ForegroundColor Green "  -VMName: $VMName"
+    Write-Host -ForegroundColor Green "  -VHDSrcPath: $VHDSrcPath"
+    Write-Host -ForegroundColor Green "  -VHDName: $VHDName"
+    Write-Host -ForegroundColor Green "  -VMMemory: $VMMemory"
+    Write-Host -ForegroundColor Green "  -SwitchName: $SwitchName"
+    Write-Host -ForegroundColor Green "  -Nics:"
+    foreach ($Nic in $Nics) {
+        Write-Host -ForegroundColor Green "   $($Nic.Name), Mac:$($Nic.MacAddress), IP:$($nic.IPAddress), GW:$($Nic.Gateway), DNS:$($Nic.DNS), VLAN:$($Nic.VLANID)"
+    }
+    Write-Host -ForegroundColor Green "  -CredentialDomain: $CredentialDomain"
+    Write-Host -ForegroundColor Green "  -CredentialUserName: $CredentialUserName"
+    Write-Host -ForegroundColor Green "  -CredentialPassword: ********"
+    Write-Host -ForegroundColor Green "  -JoinDomain: $JoinDomain"
+    Write-Host -ForegroundColor Green "  -LocalAdminPassword: ********"
+    Write-Host -ForegroundColor Green "  -DomainAdminDomain: $DomainAdminDomain"
+    Write-Host -ForegroundColor Green "  -DomainAdminUserName: $DomainAdminUserName"
+    Write-Host -ForegroundColor Green "  -ProductKey: ********"
+    Write-Host -ForegroundColor Green "  -VMProcessorCount: $VMProcessorCount"
+    Write-Host -ForegroundColor Green "  -Locale: $Locale"
+    Write-Host -ForegroundColor Green "  -TimeZone: $TimeZone"
+    Write-Host -ForegroundColor Green "  -Roles: $roles"
 
     if ( !(Test-Path $CurrentVMLocationPath) ) {  
         Write-Host -ForegroundColor Yellow "Creating folder $CurrentVMLocationPath"
@@ -251,7 +282,7 @@ function New-SdnVM() {
     }
 
     Write-Host "Copying VHD template $VHDTemplateFile to $CurrentVMLocationPath"
-    Copy-Item -Path $VHDTemplateFile -Destination $CurrentVMLocationPath -Recurse -Force | Out-Null
+    Copy-Item -Path $VHDTemplateFile -Destination $CurrentVMLocationPath -Force | Out-Null
     
     $params = @{
         'VHD'                = "$CurrentVMLocationPath\$VHDName";
@@ -259,7 +290,7 @@ function New-SdnVM() {
         'IpGwAddr'           = $IpGwAddr;
         'DomainJoin'         = $JoinDomain;
         'ComputerName'       = $VMName;
-        'KeyboardLayout'     = 'fr-fr';
+        'KeyboardLayout'     = $KeyboardLayout;
         'DomainFDQN'         = $DomainFQDN;
         'CredentialDomain'   = $CredentialDomain;
         'CredentialPassword' = $CredentialPassword;
@@ -408,7 +439,7 @@ function New-SdnDC()
     $paramsDeployForest = @{
         DomainName                    = $DomainFQDN
         DomainMode                    = 'WinThreshold'
-        DomainNetBiosName             = ($ConfigData.DomainFQDN).split(".")[0]
+        DomainNetBiosName             = $DomainFQDN.split(".")[0]
         SafeModeAdministratorPassword = $LocalAdminPassword 
     }
 
@@ -433,7 +464,7 @@ function New-SdnDC()
 
     Write-host "Wait till ADDS is totally up and running"
 
-    while ((Invoke-Command -VMName $dc.ComputerName -Credential $DomainJoinCredential { $env:COMPUTERNAME } `
+    while ((Invoke-Command -VMName $VMName -Credential $DomainJoinCredential { $env:COMPUTERNAME } `
                 -ea SilentlyContinue) -ne $dc.ComputerName) { Start-Sleep -Seconds 1 }
 }
 function New-SdnHost
@@ -442,7 +473,8 @@ function New-SdnHost
         [String] $VMName,
         [Int] $S2DDiskSize = 0,
         [Int] $S2DDiskNumber,
-        [pscredential] $DomainJoinCredential
+        [pscredential] $DomainJoinCredential,
+        [Object] $VlanInfo
     )
   
     #required for nested virtualization 
@@ -467,7 +499,7 @@ function New-SdnHost
         Start-Sleep 1
     }
 
-    Write-Host -ForegroundColor Green  "Step 4 - Adding required features on VM $($node.ComputerName)"
+    Write-Host -ForegroundColor Green  "Step 4 - Adding required features on VM $VMName"
     Invoke-Command -VMName $VMName -Credential $DomainJoinCredential {
         $FeatureList = "Hyper-V", "Failover-Clustering", "Data-Center-Bridging", "RSAT-Clustering-PowerShell", "Hyper-V-PowerShell", "FS-FileServer"
         Add-WindowsFeature $FeatureList 
@@ -486,14 +518,26 @@ function New-SdnHost
         Get-VMNetworkAdapter -ManagementOS -Name MGMT | Set-VMNetworkAdapterVlan -Access -VlanId $args[0]
         #Cred SSDP for remote administration
         Write-Host -ForegroundColor Green "Step 6 - Allowing CredSSP to managed HYPV host $($env:COMPUTERNAME) from Azure VM"
-        Enable-WSManCredSSP -Role Server -Force
+        Enable-WSManCredSSP -Role Server -Force | Out-Null
         Set-VMHost  -EnableEnhancedSessionMode $true
-    } -ArgumentList $Node.NICs[0].VLANID
-    Get-VMNetworkAdapter -VMName $VMName | Set-VMNetworkAdapterVlan -Trunk -AllowedVlanIdList 7-1001 -NativeVlanId 0
+    } -ArgumentList $VlanInfo.ManagementVlan
+    Get-VMNetworkAdapter -VMName $VMName | Set-VMNetworkAdapterVlan -Trunk -AllowedVlanIdList $VlanInfo.AllowedVlanIdList -NativeVlanId $VlanInfo.NativeVlanId
     #Adding credential to the cache
+
+    Write-Host -ForegroundColor Green "Adding credential to the cache"
+    $DomainJoinPassword = $DomainJoinCredential.GetNetworkCredential().Password
     Invoke-Expression -Command "cmdkey /add:$VMName.$($configdata.DomainFQDN) /user:$($configdata.DomainJoinUsername) /pass:$DomainJoinPassword"
+
+    #Configure Kerberos Delegation to Hyper-V Hosts
+    #This is used when SOFS configured to store VHDX file for Hyper-V Hosts
+    install-windowsfeature rsat-adds
+    Write-Host "Enable Kerberos Delegation on computer $VMName"
+    Get-ADComputer -Identity $VMName | Set-ADAccountControl -TrustedForDelegation $true
 }
 
+<#
+   This function used to configure TOR on VM specified. If VM Creation Parameters passed, we create the VM first. 
+#>
 function New-SdnToR()
 {
     Param(
@@ -501,14 +545,39 @@ function New-SdnToR()
         [String] $RouterIPAddress,
         [String] $LocalASN,
         [Object] $BgpPeers,
-        [pscredential] $DomainJoinCredential
+        [pscredential] $LocalAdminCredential,
+        [Object] $VMParams = $null
     )
 
-    Invoke-Command -VMName $VMName -Credential $DomainJoinCredential { 
+    if($VMParams -ne $null)
+    {
+        Write-Host "VM Parameters specified, create the VM first"
+        New-SdnVM @VMParams
+        Start-VM $VMName
+        Write-host "Wait till the VM $VMName is not WinRM reachable"
+        while ((Invoke-Command -VMName $VMName -Credential $LocalAdminCredential { $env:COMPUTERNAME } `
+                    -ea SilentlyContinue) -ne $VMName) { Start-Sleep -Seconds 1 }
+    
+    }
+
+    Invoke-Command -VMName $VMName -Credential $LocalAdminCredential { 
         Write-host -ForegroundColor Green "Installing RemoteAccess on vm $env:COMPUTERNAME to act as TOR Router"   
-        Add-WindowsFeature RemoteAccess -IncludeAllSubFeature -IncludeManagementTools
+        Add-WindowsFeature RemoteAccess -IncludeAllSubFeature -IncludeManagementTools -Restart
+    }
+
+    WaitForComputerToBeReady -ComputerName $VMName -CheckPendingReboot -Credential $LocalAdminCredential
+
+    Invoke-Command -VMName $VMName -Credential $LocalAdminCredential { 
+        param(
+            [String] $RouterIPAddress,
+            [String] $LocalASN,
+            [Object] $BgpPeers
+        )
+
         Install-RemoteAccess -VpnType RoutingOnly
-        Write-host -ForegroundColor Yellow "Configuring BGP router and peers"   
+        Write-host -ForegroundColor Green "Configuring BGP router and peers"
+        Write-host -ForegroundColor Green "RouterIPAddress: $RouterIPAddress"
+
         Add-BgpRouter -BgpIdentifier $RouterIPAddress -LocalASN $LocalASN
         foreach ( $BgpPeer in $BgpPeers) {
             Write-host -ForegroundColor Yellow "Configuring BGP Peer $($BgpPeer.Name), Peer IP: $($BgpPeer.PeerIPAddress), PeerAsn $($BgpPeer.PeerAsn)"  
@@ -516,5 +585,70 @@ function New-SdnToR()
                 -PeerASN $BgpPeer.PeerASN -OperationMode Mixed -PeeringMode Automatic 
         }
     
+    } -ArgumentList $RouterIPAddress, $LocalASN, $BgpPeers
+}
+
+function WaitForComputerToBeReady {
+    param(
+        [string[]] $ComputerName,
+        [Switch]$CheckPendingReboot,
+        [pscredential] $Credential
+    )
+
+
+    foreach ($computer in $computername) {        
+        write-host "Waiting for $Computer to become active."
+        
+        $continue = $true
+        while ($continue) {
+            try {
+                $ps = $null
+                $result = ""
+                
+                klist purge | out-null  #clear kerberos ticket cache 
+                Clear-DnsClientCache    #clear DNS cache in case IP address is stale
+                
+                write-host "Attempting to contact $Computer."
+                if($Credential)
+                {
+                    $ps = new-pssession -computername $Computer -Credential $Credential -erroraction ignore
+                }else
+                {
+                    $ps = new-pssession -computername $Computer -erroraction ignore
+                }
+                
+                if ($ps -ne $null) {
+                    if ($CheckPendingReboot) {                        
+                        $result = Invoke-Command -Session $ps -ScriptBlock { 
+                            if (Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
+                                "Reboot pending"
+                            } 
+                            else {
+                                hostname 
+                            }
+                        }
+                    }
+                    else {
+                        try {
+                            $result = Invoke-Command -Session $ps -ScriptBlock { hostname }
+                        }
+                        catch { }
+                    }
+                    remove-pssession $ps
+                }
+                if ($result -eq $Computer) {
+                    $continue = $false
+                    break
+                }
+                if ($result -eq "Reboot pending") {
+                    write-host "Reboot pending on $Computer.  Waiting for restart."
+                }
+            }
+            catch {
+            }
+            write-host "$Computer is not active, sleeping for 10 seconds."
+            sleep 10
+        }
+        write-host "$Computer IS ACTIVE.  Continuing with deployment."
     }
 }
