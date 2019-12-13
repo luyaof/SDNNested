@@ -44,7 +44,8 @@
 [CmdletBinding(DefaultParameterSetName = "NoParameters")]
 param(
     [Parameter(Mandatory = $false, ParameterSetName = "ConfigurationFile")]
-    [String] $ConfigurationDataFile = ".\utils\SDNNested-Deploy-Infra.psd1"
+    [String] $ConfigurationDataFile = ".\utils\SDNNested-Deploy-Infra.psd1",
+    [Switch] $RemoveExistingDeployment
 )    
 
 import-module .\SDNExpress\SDNExpressModule.psm1 -force
@@ -52,6 +53,13 @@ import-module .\utils\SDNNested-Module.psm1 -force
 
 # Script version, should be matched with the config files
 $ScriptVersion = "2.0"
+
+# Remove the current SDN Nested Deployment
+if($RemoveExistingDeployment)
+{
+    Remove-SDNNested
+}
+
 
 #Validating passed in config files
 if ($psCmdlet.ParameterSetName -eq "ConfigurationFile") {
@@ -212,66 +220,6 @@ New-NetRoute -AddressFamily "IPv4" -DestinationPrefix $configdata.PublicVIPNet -
 
 $MgmtVNIC | Set-VMNetworkAdapterVlan -Access -VlanId $configdata.ManagementVLANID
 
-Write-Host "############"
-Write-Host "########"
-Write-Host "####"
-Write-Host "--- Start Domain controller deployment "
-#Creating DC
-foreach ( $dc in $configdata.DCs) {
-    $paramsVM.VMName = $dc.ComputerName
-    $paramsVM.Nics = $dc.NICs
-    $paramsVM.VHDName = $configdata.VHDFileGUI
-
-    Write-Host -ForegroundColor Green "Step 1 - Creating DC VM $($dc.ComputerName)" 
-    New-SdnVM @paramsVM 
-
-    Start-VM $dc.ComputerName
-    Write-host "Wait till the VM $($dc.ComputerName) is not WinRM reachable"
-    while ((Invoke-Command -VMName $dc.ComputerName -Credential $LocalAdminCredential { $env:COMPUTERNAME } `
-                -ea SilentlyContinue) -ne $dc.ComputerName) { Start-Sleep -Seconds 1 }
-
-
-    # Install DC and Create AD Forest 
-    New-SdnDC -VMName $dc.ComputerName -DomainFQDN $ConfigData.DomainFQDN -LocalAdminPassword $password
-    
-
-
-    Invoke-Command -VMName $dc.ComputerName -Credential $DomainJoinCredential { 
-        $configdata = $args[0]
-        Write-host -ForegroundColor Green "Installing RemoteAccess on vm $env:COMPUTERNAME to act as TOR Router"   
-        Add-WindowsFeature RemoteAccess -IncludeAllSubFeature -IncludeManagementTools
-        Install-RemoteAccess -VpnType RoutingOnly
-        #Removing DNS registration on 2nd adapter
-        Write-host -ForegroundColor Green "Configuring DNS server to only listening on mgmt NIC"   
-        Get-NetAdapter "Ethernet 2" | Set-DnsClient -RegisterThisConnectionsAddress $false
-        #Get-NetAdapter "Ethernet 2" | Set-DnsClientServerAddress -ServerAddresses "" 
-        ipconfig /registerdns
-        dnscmd /ResetListenAddresses "$($configdata.ManagementDNS)"
-        Restart-Service DNS
-        Write-host -ForegroundColor Yellow "Configuring DC as TOR router BGP router and peers" 
-        Write-host -ForegroundColor Yellow "Configuring BGP router and peers"   
-        Add-BgpRouter -BgpIdentifier $configdata.TORrouter.BgpRouter.RouterIPAddress -LocalASN $configdata.TORrouter.BgpRouter.RouterASN
-        foreach ( $BgpPeer in $configdata.TORrouter.BgpPeers ) {
-            Add-BgpPeer -Name $BgpPeer.Name -LocalIPAddress $configdata.TORrouter.BgpRouter.RouterIPAddress -PeerIPAddress $BgpPeer.PeerIPAddress `
-                -PeerASN $configdata.TORrouter.SDNASN -OperationMode Mixed -PeeringMode Automatic 
-        }
-    
-    } -ArgumentList $configdata
-
-
-    #Configuring VLAN as now NIC has been enumerated within th DCs VM
-    $VMNics = Get-VM  $dc.ComputerName | Get-VMNetworkAdapter
-    for ( $i = 0; $i -lt $dc.NICs.count; $i++ ) {
-        foreach ($VMNic in $VMNics) {
-            if ( $VMNic.IpAddresses[0] -eq (($dc.NICs[$i]).IPAddress).split("/")[0] ) {
-                $VMNic | Set-VMNetworkAdapterVlan -Access -VlanId $dc.NICs[$i].VLANID            
-            }
-        }
-    }
-}
-
-Start-Sleep 60
-
 #>
 
 Write-Host "############"
@@ -286,8 +234,38 @@ foreach ( $torRouter in $configdata.TORrouter) {
     $paramsVM.VMProcessorCount = $torRouter.VMProcessorCount
     # No need to join ToR to domain
     $paramsVM.JoinDomain = $null
-    New-SdnToR -VMName $paramsVM.VMName -RouterIPAddress $configdata.TORrouter.bgprouter.RouterIPAddress -BgpPeers $configdata.TORrouter.BgpPeers -LocalASN $configdata.TORrouter.BgpRouter.RouterAsn -VMParams $paramsVM -LocalAdminCredential $LocalAdminCredential
+    $peerAsn = [int]$configdata.TORrouter.SDNASN
+    New-SdnToR -VMName $paramsVM.VMName -RouterIPAddress $configdata.TORrouter.bgprouter.RouterIPAddress -BgpPeers $configdata.TORrouter.BgpPeers -LocalASN $configdata.TORrouter.BgpRouter.RouterAsn -VMParams $paramsVM -LocalAdminCredential $LocalAdminCredential -PeerAsn $peerAsn
 }
+Start-Sleep 60
+
+if($configData.DCs.Count -ne 0)
+{
+    Write-Host "############"
+    Write-Host "########"
+    Write-Host "####"
+    Write-Host "--- Start Domain controller deployment "
+    #Creating DC
+    foreach ( $dc in $configdata.DCs) {
+        Write-Host "Install DC on VM $dc.ComputerName"
+        # Install DC and Create AD Forest 
+        New-SdnDC -VMName $dc.ComputerName -DomainFQDN $ConfigData.DomainFQDN -LocalAdminPassword $password -DomainAdminCredential $DomainJoinCredential
+        
+        Invoke-Command -VMName $dc.ComputerName -Credential $DomainJoinCredential { 
+            #Removing DNS registration on 2nd adapter
+            Write-host -ForegroundColor Green "Configuring DNS server to only listening on mgmt NIC"   
+            Get-NetAdapter | Set-DnsClient -RegisterThisConnectionsAddress $false
+            Set-NetAdapter "Ethernet" | Set-DnsClient -RegisterThisConnectionsAddress $true
+            #Get-NetAdapter "Ethernet 2" | Set-DnsClientServerAddress -ServerAddresses "" 
+            ipconfig /registerdns
+            dnscmd /ResetListenAddresses "$($configdata.ManagementDNS)"
+            Restart-Service DNS
+        } -ArgumentList $configdata
+    }
+    
+    Start-Sleep 60
+}
+
 
 Write-Host "############"
 Write-Host "########"
@@ -310,7 +288,7 @@ foreach ( $node in $configdata.HyperVHosts) {
     }
 
     Write-Host -ForegroundColor Green "Step 2 - Configuring VM $($node.ComputerName) used as SDN Host" 
-    New-SdnHost -VMName $node.ComputerName -S2DDiskSize $ConfigData.S2DDiskSize -S2DDiskNumber $ConfigData.S2DDiskNumber -VlanInfo $VlanInfo -DomainJoinCredential $DomainJoinCredential
+    New-SdnHost -VMName $node.ComputerName -S2DDiskSize $ConfigData.S2DDiskSize -S2DDiskNumber $ConfigData.S2DDiskNumber -VlanInfo $VlanInfo -DomainJoinCredential $DomainJoinCredential -LocalAdminCredential $LocalAdminCredential
 }
 <#
 Start-Sleep 60

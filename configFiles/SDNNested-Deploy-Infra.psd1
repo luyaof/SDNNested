@@ -35,7 +35,14 @@
     @(
         @{
             ComputerName = 'SDN-DC01'; 
+            VMMemory     = 4GB
+            VMProcessorCount = 4
 
+            NICs         = @( 
+                @{ Name = "Ethernet"; IPAddress = '10.184.108.1/24'; Gateway = ''; DNS = '' ; VLANID = 7 },
+                @{ Name = "Ethernet 2"; IPAddress = '10.10.56.1/23'; Gateway = ''; DNS = '' ; VLANID = 11 };
+            )  
+            
             SDNASN       = '64628'
             BgpRouter      = @(
                 @{

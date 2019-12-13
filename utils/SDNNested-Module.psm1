@@ -433,7 +433,8 @@ function New-SdnDC()
         [String] $VMName,
         [String] $DomainFQDN,
         #Local Admin Credential will also be used as SafeModeAdministratorPassword
-        [securestring] $LocalAdminPassword
+        [securestring] $LocalAdminPassword,
+        [pscredential] $DomainAdminCredential
     )
     
     $paramsDeployForest = @{
@@ -464,16 +465,18 @@ function New-SdnDC()
 
     Write-host "Wait till ADDS is totally up and running"
 
-    while ((Invoke-Command -VMName $VMName -Credential $DomainJoinCredential { $env:COMPUTERNAME } `
-                -ea SilentlyContinue) -ne $dc.ComputerName) { Start-Sleep -Seconds 1 }
+    WaitForVMToBeReady -VMNames $VMName -CheckPendingReboot -Credential $DomainAdminCredential
+
+    Write-host "ADDS has been up and running"
 }
 function New-SdnHost
 {
     Param(
         [String] $VMName,
-        [Int] $S2DDiskSize = 0,
+        [int64] $S2DDiskSize = 0,
         [Int] $S2DDiskNumber,
         [pscredential] $DomainJoinCredential,
+        [pscredential] $LocalAdminCredential,
         [Object] $VlanInfo
     )
   
@@ -494,10 +497,10 @@ function New-SdnHost
  
     Write-Host -ForegroundColor yellow "Waiting till the $VMName is not domain joined to $($configdata.DomainFQDN)"
     Start-Sleep 120
-    while ( $( Invoke-Command -VMName $VMName -Credential $DomainJoinCredential { 
-                (Get-WmiObject -Class Win32_ComputerSystem).PartOfDomain }) -ne $true ) {
-        Start-Sleep 1
-    }
+    #Use Local Admin Credential to connect to VM for domain join detection
+    while ((Invoke-Command -VMName $VMName -Credential $DomainJoinCredential { $env:COMPUTERNAME } `
+                -ea SilentlyContinue) -ne $VMName) { Start-Sleep -Seconds 1 }  
+
 
     Write-Host -ForegroundColor Green  "Step 4 - Adding required features on VM $VMName"
     Invoke-Command -VMName $VMName -Credential $DomainJoinCredential {
@@ -546,9 +549,15 @@ function New-SdnToR()
         [String] $LocalASN,
         [Object] $BgpPeers,
         [pscredential] $LocalAdminCredential,
-        [Object] $VMParams = $null
+        [Object] $VMParams = $null,
+        [uint32] $PeerAsn = 0
     )
 
+    Write-Host -ForegroundColor Green "New-SdnToR"
+    Write-Host -ForegroundColor Green "  -VMName: $VMName"
+    Write-Host -ForegroundColor Green "  -RouterIPAddress: $RouterIPAddress"
+    Write-Host -ForegroundColor Green "  -LocalASN: $LocalASN"
+    
     if($VMParams -ne $null)
     {
         Write-Host "VM Parameters specified, create the VM first"
@@ -565,27 +574,32 @@ function New-SdnToR()
         Add-WindowsFeature RemoteAccess -IncludeAllSubFeature -IncludeManagementTools -Restart
     }
 
-    WaitForComputerToBeReady -ComputerName $VMName -CheckPendingReboot -Credential $LocalAdminCredential
+    WaitForVMToBeReady -VMNames $VMName -CheckPendingReboot -Credential $LocalAdminCredential
 
     Invoke-Command -VMName $VMName -Credential $LocalAdminCredential { 
         param(
             [String] $RouterIPAddress,
             [String] $LocalASN,
-            [Object] $BgpPeers
+            [Object] $BgpPeers,
+            [uint32] $PeerAsn
         )
 
         Install-RemoteAccess -VpnType RoutingOnly
         Write-host -ForegroundColor Green "Configuring BGP router and peers"
         Write-host -ForegroundColor Green "RouterIPAddress: $RouterIPAddress"
+        Write-host -ForegroundColor Green "PeerAsn: $PeerAsn"
 
         Add-BgpRouter -BgpIdentifier $RouterIPAddress -LocalASN $LocalASN
         foreach ( $BgpPeer in $BgpPeers) {
+            if($BgpPeer.PeerAsn -eq $null){
+                $BgpPeer.PeerAsn = $PeerAsn
+            }
             Write-host -ForegroundColor Yellow "Configuring BGP Peer $($BgpPeer.Name), Peer IP: $($BgpPeer.PeerIPAddress), PeerAsn $($BgpPeer.PeerAsn)"  
             Add-BgpPeer -Name $BgpPeer.Name -LocalIPAddress $RouterIPAddress -PeerIPAddress $BgpPeer.PeerIPAddress `
                 -PeerASN $BgpPeer.PeerASN -OperationMode Mixed -PeeringMode Automatic 
         }
     
-    } -ArgumentList $RouterIPAddress, $LocalASN, $BgpPeers
+    } -ArgumentList $RouterIPAddress, $LocalASN, $BgpPeers, $PeerAsn
 }
 
 function WaitForComputerToBeReady {
@@ -650,5 +664,94 @@ function WaitForComputerToBeReady {
             sleep 10
         }
         write-host "$Computer IS ACTIVE.  Continuing with deployment."
+    }
+}
+
+function WaitForVMToBeReady{
+    param(
+        [string[]] $VMNames,
+        [Switch]$CheckPendingReboot,
+        [pscredential] $Credential
+    )
+
+    foreach ($VMName in $VMNames) {        
+        write-host "Waiting for $VMName to become active."
+        
+        $continue = $true
+        while ($continue) {
+            try {
+                $ps = $null
+                $result = ""
+                
+                klist purge | out-null  #clear kerberos ticket cache 
+                Clear-DnsClientCache    #clear DNS cache in case IP address is stale
+                
+                write-host "Attempting to contact $VMName."
+                if($Credential)
+                {
+                    $ps = new-pssession -VMName $VMName -Credential $Credential -erroraction ignore
+                }else
+                {
+                    $ps = new-pssession -VMName $VMName -erroraction ignore
+                }
+                
+                if ($ps -ne $null) {
+                    if ($CheckPendingReboot) {                        
+                        $result = Invoke-Command -Session $ps -ScriptBlock { 
+                            if (Test-Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
+                                "Reboot pending"
+                            } 
+                            else {
+                                hostname 
+                            }
+                        }
+                    }
+                    else {
+                        try {
+                            $result = Invoke-Command -Session $ps -ScriptBlock { hostname }
+                        }
+                        catch { }
+                    }
+                    remove-pssession $ps
+                }
+                if ($result -eq $VMName) {
+                    $continue = $false
+                    break
+                }
+                if ($result -eq "Reboot pending") {
+                    write-host "Reboot pending on $VMName.  Waiting for restart."
+                }
+            }
+            catch {
+            }
+            write-host "$VMName is not active, sleeping for 10 seconds."
+            sleep 10
+        }
+        write-host "$VMName IS ACTIVE.  Continuing with deployment."
+    }
+}
+    
+
+<#
+    Function used to remove the whole SDN Nested Deployment on current Host
+#>
+
+Function Remove-SDNNested{
+    Write-Host -ForegroundColor Green "Stopping all VMs"
+    Get-VM | Stop-Vm -Force
+    Write-Host -ForegroundColor Green "All VMs stopped"
+    Write-Host -ForegroundColor Green "Removing All VMs"
+    $allVMs = Get-VM
+    foreach($vmToRemove in $allVMs)
+    {
+        $vmPath = $vmToRemove.Path
+        $vhdPath = ($vmToRemove | Get-VMHardDiskDrive).Path
+        Write-Host "Removing VM $vmToRemove"
+        $vmToRemove | Remove-VM -Force
+        Write-Host "Removed VM $vmToRemove"
+        Write-Host "Removing VM Path $vmPath $vhdPath"
+        Remove-Item -Path $vmPath -Force -Recurse
+        Remove-Item -Path $vhdPath -Force
+        Write-Host "Removed VM Path and VHD Path"
     }
 }
