@@ -255,7 +255,7 @@ if($configData.DCs.Count -ne 0)
             #Removing DNS registration on 2nd adapter
             Write-host -ForegroundColor Green "Configuring DNS server to only listening on mgmt NIC"   
             Get-NetAdapter | Set-DnsClient -RegisterThisConnectionsAddress $false
-            Set-NetAdapter "Ethernet" | Set-DnsClient -RegisterThisConnectionsAddress $true
+            Get-NetAdapter "Ethernet" | Set-DnsClient -RegisterThisConnectionsAddress $true
             #Get-NetAdapter "Ethernet 2" | Set-DnsClientServerAddress -ServerAddresses "" 
             ipconfig /registerdns
             dnscmd /ResetListenAddresses "$($configdata.ManagementDNS)"
