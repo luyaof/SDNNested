@@ -54,11 +54,6 @@ import-module .\utils\SDNNested-Module.psm1 -force
 # Script version, should be matched with the config files
 $ScriptVersion = "2.0"
 
-# Remove the current SDN Nested Deployment
-if($RemoveExistingDeployment)
-{
-    Remove-SDNNested
-}
 
 
 #Validating passed in config files
@@ -96,6 +91,12 @@ $LocalAdminDomainUserName = $ConfigData.LocalAdminDomainUser.Split("\")[1]
 
 $password = $LocalAdminPassword | ConvertTo-SecureString -asPlainText -Force
 $LocalAdminCredential = New-Object System.Management.Automation.PSCredential(".\administrator", $password)
+
+# Remove the current SDN Nested Deployment
+if($RemoveExistingDeployment)
+{
+    Remove-SDNNested
+}
 
 if ( $null -eq $ConfigData.VMProcessorCount) { $ConfigData.VMProcessorCount = 2 }
 if ( $null -eq $ConfigData.VMMemory) { $ConfigData.VMMemory = 4GB }
