@@ -120,7 +120,8 @@ $paramsVM = @{
     'DnsIpAddr'           = $ConfigDanoteta.ManagementDNS;
     'DomainFQDN'          = $ConfigData.DomainFQDN;
     'ProductKey'          = $ConfigData.ProductKey;
-    'KeyboardLayout'      = $configdata.KeyboardLayout
+    'KeyboardLayout'      = $configdata.KeyboardLayout;
+    'Roles'               = @()
 }
 
 $paramsGW = @{
@@ -278,9 +279,10 @@ foreach ( $node in $configdata.HyperVHosts) {
     $paramsVM.VMMemory = $node.VMMemory
     $paramsVM.VMProcessorCount = $node.VMProcessorCount
     $paramsVM.JoinDomain = $configdata.DomainFQDN
+    $paramsVM.Roles = @("Microsoft-Hyper-V")
     Write-Host -ForegroundColor Green "Step 1 - Creating Host VM $($node.ComputerName)" 
     New-SdnVM @paramsVM
-
+    $paramsVM.Roles = @()
     $VlanInfo = @{
         'AllowedVlanIdList' = $node.AllowedVlanIdList
         'NativeVlanId' = $node.NativeVlanId

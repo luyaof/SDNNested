@@ -22,7 +22,8 @@ function Add-UnattendFileToVHD {
         [String] $CredentialPassword,
         [String] $CredentialUsername,
         [String] $LocalAdminPassword,
-        [Object] $NICs
+        [Object] $NICs,
+        [String[]] $Roles = @()
     )
 
     Write-Host "Generating and injecting unattend.xml to $VHD"
@@ -36,6 +37,14 @@ function Add-UnattendFileToVHD {
     Write-Host "Mounting $VHD file"
     Mount-WindowsImage -ImagePath $VHD -Index 1 -path $MountPath | out-null
 
+    if ($Roles.count -gt 0) {
+        write-sdnexpresslog "Adding Roles ($Roles) offline to save reboot later"
+
+        foreach ($role in $Roles) {
+            Enable-WindowsOptionalFeature -Path $MountPath -FeatureName $role -All -LimitAccess | Out-Null
+        }
+    }
+    
     $TimeZone = "Central European Time"
     $count = 1
     $TCPIPInterfaces = ""
@@ -246,7 +255,8 @@ function New-SdnVM() {
         [String] $Locale = [System.Globalization.CultureInfo]::CurrentCulture.Name,
         [String] $TimeZone = [TimeZoneInfo]::Local.Id,
         [String] $DomainFQDN,
-        [String] $KeyboardLayout
+        [String] $KeyboardLayout,
+        [String[]] $Roles = @()
      )
     
     $CurrentVMLocationPath = "$VMLocation\$VMName"
@@ -297,6 +307,7 @@ function New-SdnVM() {
         'CredentialUsername' = $CredentialUserName;
         'LocalAdminPassword' = $LocalAdminPassword;
         'NICS'               = $Nics;
+        'Roles'              = $Roles
     }
 
     Add-UnattendFileToVHD @params
