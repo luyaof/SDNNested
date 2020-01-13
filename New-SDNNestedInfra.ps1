@@ -293,18 +293,25 @@ foreach ( $node in $configdata.HyperVHosts) {
     Write-Host -ForegroundColor Green "Step 2 - Configuring VM $($node.ComputerName) used as SDN Host" 
     New-SdnHost -VMName $node.ComputerName -S2DDiskSize $ConfigData.S2DDiskSize -S2DDiskNumber $ConfigData.S2DDiskNumber -VlanInfo $VlanInfo -DomainJoinCredential $DomainJoinCredential -LocalAdminCredential $LocalAdminCredential
 }
-<#
+
 Start-Sleep 60
 
-Write-Host -ForegroundColor Green "Step 6 - Creating new S2D Failover cluster for Hyperconverged SDN"
-New-SDNS2DCluster $ConfigData.HyperVHosts.ComputerName $DomainJoinCredential $ConfigData.S2DClusterIP $ConfigData.S2DClusterName 
+#Create the S2D Cluster if S2DClusterName specified
+if(![String]::IsNullOrEmpty($ConfigData.S2DClusterName))
+{
+    Write-Host -ForegroundColor Green "Creating new S2D Failover cluster for Hyperconverged SDN"
+    Write-Host -ForegroundColor Green "S2DClusterName: $($ConfigData.S2DClusterName)"
+    Write-Host -ForegroundColor Green "S2DClusterIP: $($ConfigData.S2DClusterIP)"
+    New-SDNS2DCluster $ConfigData.HyperVHosts.ComputerName $DomainJoinCredential $ConfigData.S2DClusterIP $ConfigData.S2DClusterName  
+    Write-Host -ForegroundColor Yellow "Adding entry in Azure VM's host file to manage S2D and SDN with WAC"
+    Add-Content C:\windows\System32\drivers\etc\hosts -Value "$($ConfigData.S2DClusterIP) $($ConfigData.S2DClusterName)"
+    Write-Host -ForegroundColor Green "SDN HyperConverged Cluster is ready."
+    Write-Host -ForegroundColor Green ""
+}
 
-Write-Host -ForegroundColor Yellow "Adding entry in Azure VM's host file to manage S2D and SDN with WAC"
-Add-Content C:\windows\System32\drivers\etc\hosts -Value "$($ConfigData.S2DClusterIP) $($ConfigData.S2DClusterName)"
 
-Write-Host -ForegroundColor Green "SDN HyperConverged Cluster is ready."
-Write-Host -ForegroundColor Green ""
 
+<#
 Write-Host -ForegroundColor Green "Creating SMBSHare containing VHDX template to use with SDNExpress deployment"
 New-SmbShare -Name Template -Path $configdata.VHDPath -FullAccess Everyone
 
